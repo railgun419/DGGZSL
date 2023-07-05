@@ -8,9 +8,9 @@ MODEL=dpn
 ATTEMBDIM=25
 DATANAME=AWA2
 BACKBONE=resnet101
-DATAPATH='../../ZSL_Dataset/Animals_with_Attributes2/JPEGImages'
-SAVEPATH=./output/${DATANAME}/Eq9_
-RESNETPRE='../backbone/resnet101-5d3b4d8f.pth'
+DATAPATH=
+SAVEPATH=./output/${DATANAME}
+RESNETPRE=
 
 STAGE1=1
 
