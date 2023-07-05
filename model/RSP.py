@@ -3,10 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-class Model_IAS(nn.Module):
+class Refine_Semantic_Prototype(nn.Module):
 
     def __init__(self, img_dims, att_dims, scale=1, bias=False):
-        super(Model_IAS, self).__init__()
+        super(Refine_Semantic_Prototype, self).__init__()
         self.L1 = nn.Linear(att_dims, int(img_dims/2), bias=bias)
         self.L2 = nn.Linear(int(img_dims/2), img_dims, bias=bias)
         self.ReLU1 = torch.nn.LeakyReLU()
