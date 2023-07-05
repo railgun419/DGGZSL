@@ -314,20 +314,13 @@ def train(train_loader, semantic_data, model, criterions, od_optimizer, zs_optim
         for logit in logit_cls:
             L_cls += criterions[0](logit, target) / len(logit_cls)
         Loss_cls.update(L_cls)
-        # todo: v2s loss and self-pace regularization
+      
         L_v2s = 0
         label_a = torch.from_numpy(args.sf).cuda()[target, :].squeeze().to(torch.float32)
-        # seen_a = torch.from_numpy(args.sf)[args.seen_c].cuda().squeeze()
-        # for pred1, pred2 in zip(pre_attri, visual_info):
         for pred1 in pre_attri:
-            # loss1 = criterions[0](pred1@seen_a.t(), map_label(target, args.seen_c))
             loss1 = (criterions[1](pred1, label_a)) * att_weight.mean(dim=0, keepdim=True)
-            # loss1 = (criterions[1](pred1, label_a))
             L_v2s += loss1.mean()
         Loss_v2s.update(L_v2s)
-        # todo: metric learning loss
-        #  选择pre_attri中某样本属性预测前topk属性 近似于 直接取属性标注的前topk
-        #  或者选择某属性类间出现强度topk。
         L_ml = 0
         L_ml += loss_ml.mean()
         Loss_ml.update(L_ml)
@@ -372,16 +365,12 @@ def validate(val_loader1, val_loader2, semantic_data, model, args):
             # inference
             logit_zsl, logit_cls, logit_ood, _, _, _, _, _, _ = model(input, target)
             logit_zsl = logit_zsl[0]
-            # todo: v2s predication两种预测结合的效果不好
-            # label_a = torch.from_numpy(semantic_data['all_att'][...]).squeeze().cuda()
-            # pre_class = pre_attri @ label_a.t()
             if 'ood' in args.model:
                 logit_cls = logit_ood
             else:
                 logit_cls = logit_cls[0]
             logit_zsl = F.softmax(logit_zsl, dim=1).cpu().numpy()
             logit_cls = F.softmax(logit_cls, dim=1).cpu().numpy()
-            # logit_v2s = F.softmax(pre_class, dim=1).cpu().numpy()
             logit_s = logit_zsl.copy()
             logit_s[:, unseen_c] = -1
             logit_t = logit_zsl.copy()
@@ -398,7 +387,6 @@ def validate(val_loader1, val_loader2, semantic_data, model, args):
                 gt_s = np.hstack([gt_s, target.cpu().numpy()])
                 ood_logit_s = np.vstack([ood_logit_s, logit_cls])
                 zsl_logit_s = np.vstack([zsl_logit_s, logit_zsl])
-                # zsl_logit_s1 = np.vstack([zsl_logit_s1, logit_v2s])
                 zsl_logit_sS = np.vstack([zsl_logit_sS, logit_s])
                 zsl_logit_sT = np.vstack([zsl_logit_sT, logit_t])
         for i, (input, target) in enumerate(val_loader2):
@@ -408,15 +396,12 @@ def validate(val_loader1, val_loader2, semantic_data, model, args):
             # inference
             logit_zsl, logit_cls, logit_ood, _, _, _, _, _, _ = model(input, target)
             logit_zsl = logit_zsl[0]
-            # label_a = torch.from_numpy(semantic_data['all_att'][...]).squeeze().cuda()
-            # pre_class = pre_attri @ label_a.t()
             if 'ood' in args.model:
                 logit_cls = logit_ood
             else:
                 logit_cls = logit_cls[0]
             logit_zsl = F.softmax(logit_zsl, dim=1).cpu().numpy()
             logit_cls = F.softmax(logit_cls, dim=1).cpu().numpy()
-            # logit_v2s = F.softmax(pre_class, dim=1).cpu().numpy()
             logit_s = logit_zsl.copy()
             logit_s[:, unseen_c] = -1
             logit_t = logit_zsl.copy()
@@ -436,7 +421,6 @@ def validate(val_loader1, val_loader2, semantic_data, model, args):
                 zsl_logit_tT = np.vstack([zsl_logit_tT, logit_t])
         ood_logit = np.vstack([ood_logit_s, ood_logit_t])
         zsl_logit = np.vstack([zsl_logit_s, zsl_logit_t])
-        # zsl_logit_v2s = np.vstack([zsl_logit_s1, zsl_logit_t1])
         gt = np.hstack([gt_s, gt_t])
         SS = compute_class_accuracy_total(gt_s, np.argmax(zsl_logit_sS, axis=1), seen_c)
         UU = compute_class_accuracy_total(gt_t, np.argmax(zsl_logit_tT, axis=1), unseen_c)
