@@ -7,9 +7,9 @@ nvidia-smi
 MODEL=dpn
 DATANAME=CUB
 BACKBONE=resnet101
-DATAPATH='../../ZSL_Dataset/CUB_200_2011/images'
-SAVEPATH=./output/${DATANAME}/L_att
-RESNETPRE='../backbone/resnet101-5d3b4d8f.pth'
+DATAPATH=
+SAVEPATH=./output/${DATANAME}
+RESNETPRE=
 
 
 STAGE1=1
