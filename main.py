@@ -108,8 +108,6 @@ def main():
         warnings.warn('You have chosen a specific GPU. This will completely '
                       'disable data parallelism.')
     ngpus_per_node = torch.cuda.device_count()
-    # todo: DDP初始化
-    # DDP_utils.init_distributed_mode(args)
     main_worker(ngpus_per_node, args)
 
 
@@ -174,7 +172,6 @@ def main_worker(ngpus_per_node, args):
     val_dataset1 = datasets.ImageFolder(args.data, valdir1, val_transforms)
     val_dataset2 = datasets.ImageFolder(args.data, valdir2, val_transforms)
 
-    # todo: distributed sampler
     # print(f"local rank {args.local_rank} / global rank {DDP_utils.get_rank()} successfully built train dataset.")
     # num_tasks = DDP_utils.get_world_size()
     # global_rank = DDP_utils.get_rank()
@@ -207,7 +204,6 @@ def main_worker(ngpus_per_node, args):
     if args.gpu is not None:
         torch.cuda.set_device(args.gpu)
         model = model.cuda(args.gpu)
-        # comment out the following line for debugging
     else:
 
         # model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -297,7 +293,6 @@ def train(train_loader, semantic_data, model, criterions, od_optimizer, zs_optim
         freeze_bn(model)
 
     for i, (input, target) in enumerate(train_loader):
-        # measure data loading time
         if args.gpu is not None:
             input = input.cuda(args.gpu, non_blocking=True)
         target = target.cuda(args.gpu, non_blocking=True)  # target:class number of every input
