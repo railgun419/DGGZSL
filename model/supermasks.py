@@ -18,14 +18,6 @@ class SuperMask(nn.Module):
 
         # Define the super mask logits
         if self.init_setting == "random_uniform":
-            # self.super_mask_logits = nn.ParameterDict(
-            #     {
-            #         str(x): nn.init.xavier_normal_(nn.Parameter(torch.empty(self.act_size, requires_grad=True)))
-            #         # nn.Parameter(torch.rand(self.act_size, requires_grad=True))
-            #         for x in args.seen_c
-            #     }
-            # )
-            # self.super_mask_logits = nn.init.xavier_normal_(nn.Parameter(torch.empty(self.act_size, requires_grad=True)))
             self.super_mask_logits = nn.ParameterList(
                 {
                     nn.init.xavier_normal_(nn.Parameter(torch.empty(self.act_size, requires_grad=True)))
@@ -47,7 +39,6 @@ class SuperMask(nn.Module):
     def forward(self, activation, targets, mode="sample", conv_mode=False):
         # Mask repeated along channel dimensions if conv_mode == True
         activation = activation.permute(1, 0, 2) #bs na dim
-        # todo: K个mask，先把target映射到具体domain中。后续根据domain_label挑选domain_mask
         domain_label = torch.zeros_like(targets)
         for i, label_in_domain in enumerate(self.domain_list):
             for l in label_in_domain:
@@ -101,22 +92,6 @@ class SuperMask(nn.Module):
                 activation = soft_mask * activation
         elif mode == "avg_mask_softscale":
             # Average all the source domain masks
-            # instead of combining them
-            '''
-            sf = torch.from_numpy(self.args.sf)
-            seen_sf = sf[self.args.seen_c, :]
-            idx1, idx2 = torch.nonzero(seen_sf, as_tuple=True)
-            avg = seen_sf[idx1, idx2].mean()
-            # pos_index = torch.where(sf > avg, 1, 0)
-            # pos_index[self.args.unseen_c, :] = 0.0
-            # 取消pos_index中不可见类的选择下标
-            # all_probs = torch.stack([self.super_mask_logits[x] for x in range(sf.shape[0])])
-            pos_index = torch.where(seen_sf > (2 * avg), 1, 0)
-            all_probs = torch.stack([self.super_mask_logits[str(x.item())] for x in self.args.seen_c])
-            # 拼接所有类的mask得到nc*na*dim的张量
-            mean_probs = [torch.mean(torch.sigmoid(all_probs[pos_index[:, x], x, :]), dim=0) for x in range(sf.shape[1])]
-            # 每个属性根据pos_index找到出现多的属性mask
-            '''
             all_probs = [torch.sigmoid(self.super_mask_logits[x]) for x in range(len(self.domain_list))]
             all_probs = torch.mean(torch.stack(all_probs), 0)
             mean_mask = [all_probs for x in targets]
@@ -145,7 +120,6 @@ class SuperMask(nn.Module):
     def sparsity_penalty(self):
         sparse_pen = 0
         for mask in self.super_mask_logits:
-            # 原本是torch.sum
             sparse_pen += torch.mean(torch.sigmoid(mask))
         return sparse_pen / len(self.super_mask_logits)
 
