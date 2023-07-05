@@ -1,0 +1,224 @@
+import torch.nn as nn
+import math
+import torch
+import torch.nn.functional as F
+import torchvision
+import copy
+from models.supermasks import SuperMask
+from models.IAS import Model_IAS
+from models.circle_loss import CircleLoss
+from utils.utils import contrastive_loss
+
+def _get_clones(module, N):
+    return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
+
+
+class PrtAttLayer(nn.Module):
+    def __init__(self, dim, nhead, dropout=0.1):
+        super().__init__()
+        self.multihead_attn = nn.MultiheadAttention(dim, nhead, dropout=dropout)
+        # todo：在检测模型里有 FC-ReLU-FC且FC的维度不变，则只需对skip—connection最后相加前的结果施加对比损失
+        #  区别在于我们的方法检测开始和结束都对vis_prt进行了域不变解耦, 且解耦方式不同，该模块只能实现softscale，是否取消refine
+        #  Linear的个数需要增加512*512*2 每个属性各一个 512*512*2*312 参数量即使取消一个FC相比旧版本mask也大得多,mask的好处就是向量参数少
+        #  但坏处就是没有mask来的显式
+        self.linear1 = nn.Linear(dim, dim)
+        self.linear2 = nn.Linear(dim, dim)
+        self.activation = nn.ReLU(inplace=True)
+
+    def prt_interact(self, sem_prt):
+        tgt2 = self.self_attn(sem_prt, sem_prt, value=sem_prt)[0]
+        sem_prt = sem_prt + self.dropout1(tgt2)
+        return sem_prt
+
+    def prt_assign(self, vis_prt, vis_query):
+        vis_prt = self.multihead_attn(query=vis_prt,
+                                      key=vis_query,
+                                      value=vis_query)[0]
+        return vis_prt
+
+    def prt_refine(self, vis_prt):
+        new_vis_prt = self.linear2(self.activation(self.linear1(vis_prt)))
+        return new_vis_prt + vis_prt
+
+    def forward(self, vis_prt, vis_query):
+        # sem_prt: 196*bs*c
+        # vis_query: wh*bs*c
+        vis_prt = self.prt_assign(vis_prt, vis_query)
+        vis_prt = self.prt_refine(vis_prt)
+        return vis_prt
+
+
+class PrtClsLayer(nn.Module):
+    def __init__(self, nc, na, dim):
+        super().__init__()
+
+        self.linear1 = nn.Linear(dim, dim)
+        self.linear2 = nn.Linear(dim, dim)
+
+        self.fc1 = nn.Linear(dim, dim // na)
+        self.fc2 = nn.Linear(dim // na, dim)
+
+        self.weight_bias = nn.Parameter(torch.empty(nc, dim))
+        nn.init.kaiming_uniform_(self.weight_bias, a=math.sqrt(5))
+        self.bias = nn.Parameter(torch.empty(nc))
+        fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight_bias)
+        bound = 1 / math.sqrt(fan_in)
+        nn.init.uniform_(self.bias, -bound, bound)
+
+        self.activation = nn.ReLU()
+
+    def prt_refine(self, prt):
+        w = F.sigmoid(self.fc2(self.activation(self.fc1(prt))))
+        prt = self.linear2(self.activation(self.linear1(prt)))
+        prt = self.weight_bias + prt * w
+        return prt
+
+    def forward(self, query, cls_prt):
+        cls_prt = self.prt_refine(cls_prt)
+        logit = F.linear(query, cls_prt, self.bias)
+        return logit, cls_prt
+
+
+class DPN(nn.Module):
+    def __init__(self, pretrained=True, args=None):
+        super(DPN, self).__init__()
+        ''' default '''
+        num_classes = args.num_classes
+        is_fix = args.is_fix
+        sf_size = args.sf_size
+        vis_prt_dim = sf_size
+        self.sf = torch.from_numpy(args.sf).to(torch.float32)
+        self.args = args
+        vis_emb_dim = args.vis_emb_dim
+        att_emb_dim = args.att_emb_dim
+        ''' backbone net'''
+        if args.backbone == 'resnet101':
+            self.backbone = torchvision.models.resnet101()
+        elif args.backbone == 'resnet50':
+            self.backbone = torchvision.models.resnet50()
+        if (is_fix):
+            for p in self.parameters():
+                p.requires_grad = False
+        ''' ZSR '''
+        self.vis_proj = nn.Sequential(
+            nn.Conv2d(2048, vis_emb_dim, kernel_size=1, stride=1, padding=0, bias=False),
+            nn.BatchNorm2d(vis_emb_dim),
+            nn.ReLU(inplace=True),
+        )
+        emb_dim = att_emb_dim * vis_prt_dim
+        # att prt
+        self.zsl_prt_emb = nn.Embedding(vis_prt_dim, vis_emb_dim)
+        self.zsl_prt_dec = _get_clones(PrtAttLayer(dim=vis_emb_dim, nhead=8), args.n_dec)
+        self.zsl_prt_s2v = _get_clones(nn.Sequential(nn.Linear(vis_emb_dim, att_emb_dim), nn.LeakyReLU()), args.n_dec)
+        # cate prt
+        self.cls_prt_emb = nn.Parameter(torch.empty(num_classes, emb_dim))
+        nn.init.kaiming_uniform_(self.cls_prt_emb, a=math.sqrt(5))
+        self.cls_prt_dec = _get_clones(PrtClsLayer(nc=num_classes, na=att_emb_dim, dim=emb_dim), args.n_dec)
+        # sem proj
+        self.sem_proj = nn.Sequential(
+            nn.Linear(sf_size, int(emb_dim / 2)),
+            nn.LeakyReLU(),
+            nn.Linear(int(emb_dim / 2), emb_dim),
+            nn.LeakyReLU(),
+        )
+
+        ''' params ini '''
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+        if pretrained:
+            if args.backbone == 'resnet101':
+                self.backbone.load_state_dict(torch.load(args.resnet_pretrain))
+            elif args.backbone == 'resnet50':
+                self.backbone.load_state_dict(torch.load(args.resnet_pretrain))
+        self.backbone = nn.Sequential(*list(self.backbone.children())[:-2])
+        # todo: refine_sem_proj
+        self.refine_sem_proj = Model_IAS(emb_dim, vis_prt_dim)
+        # todo: V2S
+        self.ALE_vector = nn.Sequential(
+            nn.Linear(emb_dim, sf_size),
+            nn.ReLU()
+        )
+        # todo: self-pace weight
+        self.att_weight = nn.Parameter(torch.ones(1, sf_size), requires_grad=True)
+        # todo: mask module
+        self.mask_module = SuperMask(args, [vis_prt_dim, vis_emb_dim], 'random_uniform')
+        # self.net_P = nn.Linear(vis_emb_dim, 32)
+        # self.ALE_vector2 = nn.Sequential(
+        #     nn.Linear(emb_dim, sf_size),
+        #     nn.ReLU()
+        # )
+
+    def forward(self, x, targets):
+        # backbone
+        last_conv = self.backbone(x)
+        bs, c, h, w = last_conv.shape
+        # wh*bs*c
+        vis_query = self.vis_proj(last_conv).flatten(2).permute(2, 0, 1)  # wh*bs*c
+        # semantic projection
+        # TODO: S2V with visual information如何使semantic prototype获得视觉信息
+        #  比如我们用V2S得到的视觉信息来优化S2V映射，将关系网络也加入到迭代中sem_proj(0.9sf+0.1pre_attri)
+        att_weight = torch.softmax(self.att_weight, dim=1)
+        sem_emb = self.sem_proj(self.sf.cuda())
+        sem_emb_norm = F.normalize(sem_emb, p=2, dim=1)
+        # attribute prototype
+        vis_prt = self.zsl_prt_emb.weight.unsqueeze(1).repeat(1, bs, 1).cuda()
+        vis_embs = []
+        logit_zsl = []
+        pre_attri = []
+        visual_info = []
+        L_ml = torch.tensor([0.]).cuda()
+        L_sp = torch.tensor([0.]).cuda()
+        L_sIOU = torch.tensor([0.]).cuda()
+        for dec, proj, i in zip(self.zsl_prt_dec, self.zsl_prt_s2v, range(self.args.n_dec)):
+            # todo: 域特征解耦前后对vis_prt和vis_emb都要强调域不变部分，即域不变信息要反馈给原型和映射矩阵
+            vis_prt = dec(vis_prt, vis_query)
+            # if self.training:
+                # if i == 0:
+                #     vis_prt = dec(vis_prt, vis_query)
+                # else:
+                #     vis_prt = dec(self.mask_module(vis_prt, targets, 'softscale') + vis_prt, vis_query)
+                # vis_emb = proj(self.mask_module(vis_prt, targets, 'softscale') + vis_prt).permute(1, 0, 2).flatten(1)
+                # vis_emb = proj(vis_prt).permute(1, 0, 2).flatten(1)
+            # else:
+                # if i == 0:
+                #     vis_prt = dec(vis_prt, vis_query)
+                # else:
+                #     vis_prt = dec(self.mask_module(vis_prt, targets, 'avg_mask_softscale') + vis_prt, vis_query)
+                # vis_emb = proj(self.mask_module(vis_prt, targets, 'avg_mask_softscale') + vis_prt).permute(1, 0, 2).flatten(1)
+                # vis_emb = proj(vis_prt).permute(1, 0, 2).flatten(1)
+            # if i == 0:
+            #     vis_prt = self.fusion(torch.cat([vis_prt, self.mask_module(vis_prt, targets, 'encoder')], -1))
+            # vis_prt = dec(vis_prt, vis_query)
+            # vis_invariant = self.mask_module(vis_prt, targets, 'encoder')
+            # vis_prt = self.fusion(torch.cat([vis_prt, vis_invariant], -1))
+            vis_emb = proj(vis_prt).permute(1, 0, 2).flatten(1)
+            # todo: detect and classify without mask/detect with prt_refine
+            # vis_prt = dec(vis_prt, vis_query)
+            # vis_emb = proj(vis_prt).permute(1, 0, 2).flatten(1)
+            # todo: V2S预测结果
+            pre_attri.append(self.ALE_vector(vis_emb))
+            # visual_info.append(self.ALE_vector2(vis_emb))
+            vis_embs.append(vis_emb)
+            vis_emb_norm = F.normalize(vis_emb, p=2, dim=1)
+            # logit_zsl.append(self.refine_sem_proj(vis_emb_norm, self.sf.cuda(), pre_attri[-1], att_weight))
+            logit_zsl.append(vis_emb_norm.mm(sem_emb_norm.permute(1, 0)))
+            # if self.training:
+            #     vis_invariant = self.mask_module(vis_prt, targets, 'sample')
+                # vis_invariant = self.net_P(vis_invariant)
+                # L_ml += contrastive_loss(self.args, vis_invariant, pre_attri[-1])
+                # L_ml += contrastive_loss(self.args, vis_invariant, targets)
+                # L_sp += self.mask_module.sparsity_penalty()
+                # L_sIOU += self.mask_module.overlap_penalty()
+        # category prototype
+        vis_embs.reverse()
+        cls_prt = self.cls_prt_emb.cuda()
+        logit_cls = []
+        for dec, query in zip(self.cls_prt_dec, vis_embs):
+            logit, cls_prt = dec(query, cls_prt)
+            logit_cls.append(logit)
+        logit_zsl.reverse()
+        return logit_zsl, logit_cls, None, pre_attri, att_weight, L_ml, L_sp, L_sIOU, visual_info
