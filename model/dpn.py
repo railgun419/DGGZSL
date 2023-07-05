@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import torchvision
 import copy
 from models.supermasks import SuperMask
-from models.IAS import Model_IAS
+from models.RSP import Refine_Semantic_Prototype
 from models.circle_loss import CircleLoss
 from utils.utils import contrastive_loss
 
@@ -131,7 +131,7 @@ class DPN(nn.Module):
             elif args.backbone == 'resnet50':
                 self.backbone.load_state_dict(torch.load(args.resnet_pretrain))
         self.backbone = nn.Sequential(*list(self.backbone.children())[:-2])
-        self.refine_sem_proj = Model_IAS(emb_dim, vis_prt_dim)
+        self.refine_sem_proj = Refine_Semantic_Prototype(emb_dim, vis_prt_dim)
         self.ALE_vector = nn.Sequential(
             nn.Linear(emb_dim, sf_size),
             nn.ReLU()
