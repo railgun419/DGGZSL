@@ -30,7 +30,7 @@ class SuperMask(nn.Module):
                 [self.init_scalar] * self.act_size, requires_grad=True
             )
             self.super_mask_logits = nn.ParameterList(
-                {nn.Parameter(param_tensor.clone()) for x in range(self.domain_num)}
+                {nn.Parameter(param_tensor.clone()) for x in range(self.domain_list)}
             )
         elif self.init_setting == 'encoder':
             self.encoder_weight = nn.init.xavier_normal_(
