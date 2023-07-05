@@ -8,9 +8,9 @@ ATTEMBDIM=21
 MODEL=dpn
 DATANAME=sun
 BACKBONE=resnet101
-DATAPATH='../../ZSL-Dataset/SUN/images'
-SAVEPATH=./output/${DATANAME}/bs-64
-RESNETPRE='../backbone/resnet101-5d3b4d8f.pth'
+DATAPATH=
+SAVEPATH=./output/${DATANAME}/
+RESNETPRE=
 
 STAGE1=1
 if [ ${STAGE1} = 1 ]
